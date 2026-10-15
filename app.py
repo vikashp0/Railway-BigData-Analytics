@@ -2,8 +2,24 @@ import os
 import requests
 import streamlit as st
 import pandas as pd
+import shutil
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Find Java before importing/starting PySpark.
+# On Streamlit Community Cloud, install Java with packages.txt:
+# openjdk-17-jre-headless
+java_path = shutil.which("java")
+if java_path and not os.getenv("JAVA_HOME"):
+    try:
+        detected_java_home = str(
+            Path(java_path).resolve().parent.parent
+        )
+        os.environ["JAVA_HOME"] = detected_java_home
+    except Exception:
+        pass
+
 from pyspark.sql import SparkSession
 
 
@@ -651,30 +667,44 @@ st.caption(
     "for Big Data processing."
 )
 
+spark = None
+
 try:
+    # Check Java before starting Spark, so the user sees a clear message.
+    java_path = shutil.which("java")
 
-    # -----------------------------------------------------
-    # CREATE SPARK SESSION
-    # -----------------------------------------------------
+    if not java_path:
+        st.warning(
+            "⚠️ Java runtime nahi mila. Streamlit Cloud ke project root "
+            "me packages.txt file banao aur isme "
+            "'openjdk-17-jre-headless' likho. Phir GitHub par push karke "
+            "app rebuild hone do."
+        )
+        st.info(
+            "RailRadar API aur dashboard kaam kar rahe hain; "
+            "sirf PySpark runtime start nahi hua."
+        )
+    else:
+        # Use detected JAVA_HOME if not already provided.
+        if not os.getenv("JAVA_HOME"):
+            os.environ["JAVA_HOME"] = str(
+                Path(java_path).resolve().parent.parent
+            )
 
-    spark = (
-        SparkSession.builder
-        .appName("RailwayLiveAnalytics")
-        .master("local[*]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .getOrCreate()
-    )
+        # Create Spark session. Avoid binding to localhost explicitly;
+        # Spark's default host detection is more portable on hosted services.
+        spark = (
+            SparkSession.builder
+            .appName("RailwayLiveAnalytics")
+            .master("local[1]")
+            .config("spark.ui.enabled", "false")
+            .config("spark.driver.host", "127.0.0.1")
+            .getOrCreate()
+        )
 
-    spark.sparkContext.setLogLevel("ERROR")
+        spark.sparkContext.setLogLevel("ERROR")
 
-
-    # -----------------------------------------------------
-    # CREATE RECORD
-    # -----------------------------------------------------
-
-    spark_records = [
-        {
+        spark_records = [{
             "train_number": str(number),
             "train_name": str(name),
             "train_type": str(train_type),
@@ -682,126 +712,60 @@ try:
             "journey_date": str(start_date),
             "status": str(status),
             "last_updated": str(updated)
-        }
-    ]
+        }]
 
+        spark_df = spark.createDataFrame(spark_records)
 
-    # -----------------------------------------------------
-    # SPARK DATAFRAME
-    # -----------------------------------------------------
+        # A single small conversion is sufficient for this dashboard.
+        spark_display = spark_df.toPandas()
 
-    spark_df = spark.createDataFrame(
-        spark_records
-    )
-
-    st.success(
-        "✅ PySpark DataFrame created successfully."
-    )
-
-
-    # -----------------------------------------------------
-    # DISPLAY SPARK DATA
-    # -----------------------------------------------------
-
-    # Keep one Spark action only.
-    # This is more reliable on Streamlit Cloud.
-    spark_display = spark_df.toPandas()
-
-    st.dataframe(
-        spark_display,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-    # -----------------------------------------------------
-    # CLOUD-SAFE ANALYTICS
-    # -----------------------------------------------------
-
-    # Do NOT call spark_df.count() or
-    # distinct().count() here.
-    # Those extra Spark actions were causing the
-    # SparkThreadUtils / JobAbortedException on Cloud.
-
-    record_count = len(spark_display)
-
-    unique_trains = (
-        spark_display["train_number"]
-        .astype(str)
-        .nunique()
-    )
-
-
-    a1, a2, a3 = st.columns(3)
-
-    with a1:
-        st.metric(
-            "Spark Records",
-            record_count
+        st.success("✅ PySpark DataFrame created and processed successfully.")
+        st.dataframe(
+            spark_display,
+            use_container_width=True,
+            hide_index=True
         )
 
-    with a2:
-        st.metric(
-            "Unique Trains",
-            unique_trains
-        )
+        record_count = len(spark_display)
+        unique_trains = spark_display["train_number"].astype(str).nunique()
 
-    with a3:
-        st.metric(
-            "Engine",
-            "PySpark"
-        )
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            st.metric("Spark Records", record_count)
+        with a2:
+            st.metric("Unique Trains", unique_trains)
+        with a3:
+            st.metric("Engine", "PySpark")
 
-
-    # -----------------------------------------------------
-    # SCHEMA
-    # -----------------------------------------------------
-
-    with st.expander("🔎 View Spark DataFrame Schema"):
-
-        schema_rows = []
-
-        for field in spark_df.schema.fields:
-
-            schema_rows.append(
+        with st.expander("🔎 View Spark DataFrame Schema"):
+            schema_rows = [
                 {
                     "Column": field.name,
                     "Data Type": str(field.dataType),
                     "Nullable": field.nullable
                 }
+                for field in spark_df.schema.fields
+            ]
+            st.dataframe(
+                pd.DataFrame(schema_rows),
+                use_container_width=True,
+                hide_index=True
             )
 
-        st.dataframe(
-            pd.DataFrame(schema_rows),
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-    # -----------------------------------------------------
-    # STOP SPARK
-    # -----------------------------------------------------
-
-    spark.stop()
-
-
 except Exception as e:
-
     st.warning(
-        "⚠️ PySpark processing issue detected."
+        "⚠️ PySpark start/process nahi ho paya. "
+        "Railway API dashboard phir bhi available hai."
     )
-
-    st.caption(
-        "API aur dashboard data available hai, "
-        "lekin Spark runtime me problem aa rahi hai."
-    )
-
     with st.expander("Technical Error"):
+        st.code(str(e), language="text")
 
-        st.code(
-            str(e),
-            language="text"
-        )
+finally:
+    if spark is not None:
+        try:
+            spark.stop()
+        except Exception:
+            pass
 
 
 # =========================================================
