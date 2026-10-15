@@ -20,6 +20,14 @@ if java_path and not os.getenv("JAVA_HOME"):
     except Exception:
         pass
 
+# Discover Java runtime before starting Spark.
+java_path = shutil.which("java")
+if java_path and not os.getenv("JAVA_HOME"):
+    resolved_java = Path(java_path).resolve()
+    candidate_home = resolved_java.parent.parent
+    if (candidate_home / "bin" / "java").exists():
+        os.environ["JAVA_HOME"] = str(candidate_home)
+
 from pyspark.sql import SparkSession
 
 
@@ -551,6 +559,7 @@ if current_location:
         if location_rows:
 
             location_df = pd.DataFrame(location_rows)
+            location_df["Value"] = location_df["Value"].map(str)
 
             st.dataframe(
                 location_df,
@@ -631,7 +640,7 @@ for section_title, data_key in extra_sections:
 
             if rows:
                 st.dataframe(
-                    pd.DataFrame(rows),
+                    pd.DataFrame(rows).astype(str),
                     use_container_width=True,
                     hide_index=True
                 )
